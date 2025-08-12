@@ -1,0 +1,14 @@
+streamlit
+pandas
+matplotlib
+beautifulsoup4
+requests
+feedparser
+googletrans==4.0.2
+gtts
+python-dotenv
+lxml
+html5lib
+groq
+pymongo[srv]
+bcrypt==4.0.1
