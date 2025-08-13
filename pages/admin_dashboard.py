@@ -2,6 +2,7 @@ import streamlit as st
 from datetime import datetime, timedelta
 import sys
 import os
+from bson import ObjectId
 
 # Add the parent directory to path so we can import from the main app
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -169,19 +170,81 @@ elif menu == "Search Analytics":
         else:
             st.info("No search data available for the selected date range.")
         
-        # Recent searches
-        st.subheader("Recent Searches")
-        recent_searches = [
-            {
-                "Query": s['query'],
-                "User": s.get('user_id', 'Anonymous'),
-                "Results": s.get('results_count', 0),
-                "Timestamp": s['timestamp'].strftime('%Y-%m-%d %H:%M')
-            }
-            for s in search_history[:20]  # Show most recent 20 searches
-        ]
+        # Function to get username from user_id
+        def get_username(user_id):
+            try:
+                if not user_id or user_id == 'Anonymous':
+                    return 'Anonymous'
+                user = users_collection.find_one({"_id": ObjectId(user_id)})
+                return user.get('username', f'User ({user_id[:6]}...)') if user else f'Deleted User ({user_id[:6]}...)'
+            except Exception as e:
+                print(f"Error getting username for {user_id}: {str(e)}")
+                return f'Error: {str(e)}'
         
-        if recent_searches:
+        # Get unique user IDs from search history
+        user_ids = list({s['user_id'] for s in search_history if s.get('user_id')})
+        
+        # Create a mapping of user_id to username
+        user_map = {}
+        for user_id in user_ids:
+            user_map[user_id] = get_username(user_id)
+        
+        # Recent searches with expandable article details
+        st.subheader("Recent Searches")
+        
+        if not search_history:
+            st.info("No recent searches to display.")
+        else:
+            # Display a table of recent searches
+            recent_searches = []
+            for s in search_history[:20]:  # Show most recent 20 searches
+                user_id = s.get('user_id', 'Anonymous')
+                username = user_map.get(user_id, 'Anonymous')
+                
+                search_entry = {
+                    "Query": s['query'],
+                    "User": f"{username}",
+                    "Results": s.get('results_count', 0),
+                    "Timestamp": s['timestamp'].strftime('%Y-%m-%d %H:%M')
+                }
+                recent_searches.append(search_entry)
+                
+                # Add expandable section for article details
+                with st.expander(f"🔍 {s['query']} - {username} - {search_entry['Timestamp']}", expanded=False):
+                    st.write(f"**User:** {username}")
+                    if user_id != 'Anonymous':
+                        st.write(f"**User ID:** {user_id}")
+                    st.write(f"**Date/Time:** {search_entry['Timestamp']}")
+                    st.write(f"**Number of Results:** {search_entry['Results']}")
+                    
+                    # Display articles if available
+                    if 'articles' in s and s['articles']:
+                        st.subheader("Articles")
+                        for i, article in enumerate(s['articles'], 1):
+                            with st.container():
+                                st.markdown(f"### {i}. {article.get('title', 'No title')}")
+                                st.write(f"**Source:** {article.get('source', 'Unknown')}")
+                                st.write(f"**Date:** {article.get('publish_date', 'Unknown')}")
+                                
+                                # Display sentiment if available
+                                if 'sentiment' in article and article['sentiment']:
+                                    sentiment = article['sentiment']
+                                    st.write(f"**Sentiment:** {sentiment.get('label', 'N/A')} (Score: {sentiment.get('score', 0):.2f})")
+                                
+                                # Display summary if available
+                                if article.get('summary'):
+                                    with st.expander("View Summary", expanded=False):
+                                        st.write(article['summary'])
+                                
+                                # Add a link to the original article
+                                if article.get('url'):
+                                    st.markdown(f"[Read full article]({article['url']})")
+                                
+                                st.markdown("---")  # Separator between articles
+                    else:
+                        st.info("No article details available for this search.")
+            
+            # Display the search history table
             st.dataframe(
                 recent_searches,
                 column_config={
@@ -190,8 +253,6 @@ elif menu == "Search Analytics":
                 hide_index=True,
                 use_container_width=True
             )
-        else:
-            st.info("No recent searches to display.")
     else:
         st.info("No search history found for the selected date range.")
 

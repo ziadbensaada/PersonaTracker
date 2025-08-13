@@ -99,24 +99,49 @@ def create_user(username: str, email: str, password: str, role: str = 'user'):
         print(f"Error creating user {username}: {str(e)}")
         return None, str(e)
 
-def log_search(user_id: str, query: str, results_count: int):
-    """Log a search query.
+def log_search(user_id: str, query: str, results_count: int, articles: list = None):
+    """Log a search query with optional article details.
     
     Args:
         user_id: ID of the user who performed the search
         query: Search query
         results_count: Number of results returned
+        articles: List of article dictionaries with full details (optional)
     """
     try:
         search_log = {
             "user_id": user_id,
             "query": query,
             "results_count": results_count,
-            "timestamp": datetime.utcnow()
+            "timestamp": datetime.utcnow(),
+            "articles": []
         }
+        
+        # Add article details if provided
+        if articles:
+            # Clean up articles to store only necessary fields and make them JSON serializable
+            for article in articles:
+                # Create a clean article object with only the fields we want to store
+                clean_article = {
+                    'title': article.get('title', ''),
+                    'url': article.get('url', ''),
+                    'source': article.get('source', ''),
+                    'publish_date': article.get('publish_date', ''),
+                    'summary': article.get('summary', ''),
+                    'content': article.get('content', ''),
+                    'sentiment': article.get('sentiment', {})
+                }
+                # Convert datetime objects to string if they exist
+                if 'publish_date' in article and hasattr(article['publish_date'], 'isoformat'):
+                    clean_article['publish_date'] = article['publish_date'].isoformat()
+                
+                search_log['articles'].append(clean_article)
+        
         search_history_collection.insert_one(search_log)
+        return True
     except Exception as e:
         print(f"Error logging search: {str(e)}")
+        return False
 
 def get_search_history(user_id: str, limit: int = 10):
     """Retrieve search history for a user.

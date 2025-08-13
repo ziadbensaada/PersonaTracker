@@ -9,6 +9,7 @@ from sentiment_analysis import analyze_sentiment  # Import the sentiment analysi
 from summarizer import generate_overall_summary  # Import the summarizer function
 from tts import translate_and_generate_audio  # Import the TTS function
 from auth_ui import show_login_form, show_register_form, show_logout_button, get_current_user, require_login, require_admin
+from models import log_search  # Import the search logging function
 import asyncio
 
 # Set up the Streamlit app title
@@ -150,6 +151,20 @@ finally:
 if not articles:
     st.error("No articles found. Please try again with a different name or date range.")
 else:
+    # Log the search in the database with full article details
+    if user and '_id' in user:
+        try:
+            log_success = log_search(
+                user_id=str(user['_id']), 
+                query=search_query, 
+                results_count=len(articles),
+                articles=articles
+            )
+            if not log_success:
+                st.warning("Search was successful, but there was an issue saving the search history.")
+        except Exception as e:
+            st.error(f"Error logging search: {str(e)}")
+
     # Group articles by date
     articles_by_date = {}
     for article in articles:
