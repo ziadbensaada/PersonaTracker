@@ -12,6 +12,9 @@ import os
 import hashlib
 from pathlib import Path
 
+# Ensure cache directory exists
+os.makedirs('cache/rss_cache', exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -27,7 +30,40 @@ CACHE_TTL = timedelta(hours=24)  # Cache for 24 hours
 
 # User agent for requests
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-HEADERS = {'User-Agent': USER_AGENT}
+
+# Headers to mimic a browser
+HEADERS = {
+    'User-Agent': USER_AGENT,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'DNT': '1',
+    'Referer': 'https://www.google.com/'
+}
+
+def setup_selenium_driver():
+    """Set up and return a Selenium WebDriver with Chrome."""
+    chrome_options = Options()
+    chrome_options.add_argument('--headless')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--window-size=1920x1080')
+    chrome_options.add_argument(f'user-agent={USER_AGENT}')
+    
+    # Disable images for faster loading
+    prefs = {"profile.managed_default_content_settings.images": 2}
+    chrome_options.add_experimental_option("prefs", prefs)
+    
+    try:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+        driver.set_page_load_timeout(30)
+        return driver
+    except Exception as e:
+        logger.error(f"Failed to initialize Selenium: {str(e)}")
+        return None
 
 def get_cache_key(query: str, feed_url: str) -> str:
     """Generate a cache key for the query and feed URL"""
@@ -91,24 +127,91 @@ def clean_url(url: str) -> str:
         return url
 
 def extract_article_content(url: str) -> Optional[Dict[str, str]]:
-    """Extract article content using BeautifulSoup"""
+    """Extract article content and first image using BeautifulSoup"""
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        logger.info(f"\n{'='*80}\nProcessing URL: {url}\n{'='*80}")
+        
+        # Use requests with session
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        response = session.get(url, timeout=20)
         response.raise_for_status()
+        
+        # Check if the response is HTML
+        content_type = response.headers.get('content-type', '').lower()
+        if 'text/html' not in content_type:
+            logger.warning(f"URL does not return HTML (Content-Type: {content_type})")
+            return None
+            
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Remove script and style elements
-        for script in soup(["script", "style", "nav", "footer", "header"]):
-            script.decompose()
+        # Remove script, style, and other non-content elements
+        for element in soup(["script", "style", "nav", "footer", "header", "iframe", "form"]):
+            element.decompose()
         
-        # Try to find main content using common semantic tags
-        article_body = (soup.find('article') or 
-                       soup.find('div', class_=lambda x: x and 'article' in str(x).lower()) or
-                       soup.find('div', class_=lambda x: x and 'content' in str(x).lower()) or
-                       soup.find('main') or
-                       soup.body)
+        # Try multiple strategies to find the main content
+        article_body = None
         
+        # Strategy 1: Look for common semantic tags
+        selectors = [
+            'article',
+            'main',
+            'div.article',
+            'div.article-content',
+            'div.post-content',
+            'div.entry-content',
+            'div.content',
+            'div.main-content',
+            'div.story',
+            'div.story-content',
+            'div.article-body',
+            'div.article__body',
+            'div.article-content',
+            'div.article__content',
+            'div.article-content__content',
+            'div.post',
+            'div.post__content',
+            'div.entry',
+            'div.entry__content'
+        ]
+        
+        for selector in selectors:
+            if not article_body:
+                article_body = soup.select_one(selector)
+                if article_body:
+                    logger.info(f"Found content using selector: {selector}")
+        
+        # Strategy 2: Look for elements with high text density
         if not article_body:
+            logger.info("Trying text density analysis...")
+            candidates = []
+            for elem in soup.find_all(['article', 'div', 'section']):
+                # Skip small elements
+                if len(elem.text) < 100:
+                    continue
+                    
+                # Calculate text to HTML ratio
+                text_length = len(elem.get_text(strip=True))
+                html_length = len(str(elem))
+                
+                if html_length > 0 and text_length > 0:
+                    density = text_length / html_length
+                    if density > 0.1:  # Reasonable text density threshold
+                        candidates.append((density, elem))
+            
+            if candidates:
+                candidates.sort(reverse=True, key=lambda x: x[0])
+                article_body = candidates[0][1]
+                logger.info("Found content using text density analysis")
+        
+        # Strategy 3: Fall back to body if nothing else works
+        if not article_body:
+            logger.warning("Falling back to body tag for content")
+            article_body = soup.body
+            logger.warning("Using entire body as fallback")
+            
+        if not article_body:
+            logger.error("Could not find main content area")
             return None
             
         # Clean up the text
@@ -117,6 +220,527 @@ def extract_article_content(url: str) -> Optional[Dict[str, str]]:
         
         # Extract title
         title = clean_text(soup.title.string if soup.title else "")
+        
+        # Extract first image from article
+        image_url = None
+        
+        # 1. Try Open Graph image
+        og_image = soup.find('meta', property=['og:image', 'og:image:url'])
+        if og_image and og_image.get('content'):
+            image_url = og_image.get('content', '').strip()
+            if image_url and not image_url.startswith(('data:', 'javascript:')):
+                logger.info(f"[1/6] Found OG image: {image_url}")
+            else:
+                image_url = None
+        
+        # 2. Try Twitter card image
+        if not image_url:
+            twitter_image = soup.find('meta', {'name': ['twitter:image', 'twitter:image:src']})
+            if twitter_image and twitter_image.get('content'):
+                image_url = twitter_image.get('content', '').strip()
+                if image_url and not image_url.startswith(('data:', 'javascript:')):
+                    logger.info(f"[2/6] Found Twitter image: {image_url}")
+                else:
+                    image_url = None
+        
+        # 3. Try article:image meta tag
+        if not image_url:
+            article_image = soup.find('meta', {'property': 'article:image'})
+            if article_image and article_image.get('content'):
+                image_url = article_image.get('content', '').strip()
+                if image_url and not image_url.startswith(('data:', 'javascript:')):
+                    logger.info(f"[3/6] Found article:image: {image_url}")
+                else:
+                    image_url = None
+        
+        # 4. Try JSON-LD data
+        if not image_url:
+            json_ld = soup.find('script', type='application/ld+json')
+            if json_ld:
+                try:
+                    ld_data = json.loads(json_ld.string)
+                    if isinstance(ld_data, dict) and 'image' in ld_data:
+                        if isinstance(ld_data['image'], dict):
+                            if '@list' in ld_data['image'] and ld_data['image']['@list']:
+                                image_url = ld_data['image']['@list'][0]
+                            elif 'url' in ld_data['image']:
+                                image_url = ld_data['image']['url']
+                        elif isinstance(ld_data['image'], str):
+                            image_url = ld_data['image']
+                        
+                        if image_url and not isinstance(image_url, str):
+                            image_url = None
+                        
+                        if image_url and not image_url.startswith(('http://', 'https://')):
+                            parsed_uri = urllib.parse.urlparse(url)
+                            base_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
+                            if image_url.startswith('/'):
+                                image_url = f"{base_url}{image_url}"
+                            else:
+                                image_url = f"{base_url}/{image_url}"
+                        
+                        if image_url:
+                            logger.info(f"[4/6] Found JSON-LD image: {image_url}")
+                except Exception as e:
+                    logger.warning(f"Error parsing JSON-LD: {str(e)}")
+        
+        # 5. Try to find image in article body with common classes
+        if not image_url and article_body:
+            # Common image classes used in news articles
+            img_selectors = [
+                'img.article-image', 'img.wp-post-image', 'img.attachment-post-thumbnail',
+                'img.entry-image', 'img.article-hero', 'img.article-featured-image',
+                'img.article__image', 'img.article__hero', 'img.article__featured',
+                'img.article__thumbnail', 'img.article__cover', 'img.article__header-image',
+                'img.wp-image', 'img.size-full', 'img.attachment-full', 'img.attachment-large',
+                'figure img', '.post-thumbnail img', '.featured-image img', '.entry-thumbnail img'
+            ]
+            
+            for selector in img_selectors:
+                if image_url:
+                    break
+                    
+                try:
+                    img = article_body.select_one(selector)
+                    if img and img.get('src'):
+                        src = img.get('src', '').strip()
+                        if src and not src.startswith(('data:', 'javascript:')) and any(ext in src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+                            # Handle relative URLs
+                            if not src.startswith(('http://', 'https://')):
+                                parsed_uri = urllib.parse.urlparse(url)
+                                base_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
+                                if src.startswith('//'):
+                                    src = f"{parsed_uri.scheme}:{src}"
+                                elif src.startswith('/'):
+                                    src = f"{base_url}{src}"
+                                else:
+                                    # Handle relative paths
+                                    path = parsed_uri.path.rsplit('/', 1)[0] if '/' in parsed_uri.path else ''
+                                    src = f"{base_url}{'/' if path and not path.endswith('/') else ''}{path}/{src}"
+                            
+                            if src.startswith(('http://', 'https://')):
+                                image_url = src
+                                logger.info(f"[5/6] Found image with class {selector}: {image_url}")
+                except Exception as e:
+                    logger.warning(f"Error processing image selector {selector}: {str(e)}")
+        
+        # 6. Try to find first image in article body with size > 100px
+        if not image_url and article_body:
+            for img in article_body.find_all(['img', 'div', 'figure', 'picture']):
+                try:
+                    # Try to get image URL from various attributes
+                    src = None
+                    for attr in ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image', 'data-srcset']:
+                        if img.has_attr(attr):
+                            src_attr = img[attr].strip()
+                            if src_attr and not src_attr.startswith(('data:', 'javascript:')):
+                                # Handle srcset if needed
+                                if attr == 'data-srcset':
+                                    src_parts = [p.strip().split()[0] for p in src_attr.split(',') if p.strip()]
+                                    if src_parts:
+                                        src = src_parts[0]
+                                else:
+                                    src = src_attr
+                                break
+                    
+                    if not src:
+                        # Check for picture/source elements
+                        source = img.find('source')
+                        if source and (source.has_attr('srcset') or source.has_attr('data-srcset')):
+                            srcset = source.get('srcset', '') or source.get('data-srcset', '')
+                            if srcset:
+                                src = srcet.split(',')[0].split(' ')[0].strip()
+                    
+                    if not src or not any(ext in src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+                        continue
+                        
+                    # Skip if likely an icon/tracker
+                    src_lower = src.lower()
+                    if any(x in src_lower for x in ['icon', 'logo', 'pixel', 'spacer', '1x1', 'blank.gif', 'loading', 'placeholder', 'avatar']):
+                        continue
+                        
+                    # Convert relative URLs
+                    if not src.startswith(('http://', 'https://')):
+                        parsed_uri = urllib.parse.urlparse(url)
+                        base_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
+                        if src.startswith('//'):
+                            src = f"{parsed_uri.scheme}:{src}"
+                        elif src.startswith('/'):
+                            src = f"{base_url}{src}"
+                        else:
+                            # Handle relative paths
+                            path = parsed_uri.path.rsplit('/', 1)[0] if '/' in parsed_uri.path else ''
+                            src = f"{base_url}{'/' if path and not path.endswith('/') else ''}{path}/{src}"
+                    
+                    # If we have a valid image URL, use it
+                    if src.startswith(('http://', 'https://')):
+                        image_url = src
+                        logger.info(f"[6/6] Found suitable article image: {image_url}")
+                        break
+                        
+                except Exception as img_e:
+                    logger.warning(f"Error processing image tag: {str(img_e)}")
+                    continue
+                logger.info(f"Found content using text density analysis (density: {candidates[0][0]:.2f})")
+        
+        # Strategy 3: Fall back to body if nothing else works
+        if not article_body:
+            logger.warning("Falling back to body tag for content")
+            article_body = soup.body
+            logger.warning("Using entire body as fallback")
+            
+        if not article_body:
+            logger.error("Could not find main content area")
+            return None
+            
+        # Clean up the text
+        text = article_body.get_text(separator='\n', strip=True)
+        text = '\n'.join(line for line in text.split('\n') if line.strip())
+        
+        # Extract title
+        title = clean_text(soup.title.string if soup.title else "")
+        
+        # Extract first image from article
+        image_url = None
+        try:
+            logger.info(f"\n{'='*80}\nExtracting image for: {url}\n{'='*80}")
+            
+            # 1. First try Open Graph image
+            og_image = None
+            for prop in ['og:image', 'og:image:url', 'og:image:secure_url']:
+                og_image = soup.find('meta', property=prop) or soup.find('meta', {'name': prop})
+                if og_image and og_image.get('content'):
+                    image_url = og_image.get('content', '').strip()
+                    if image_url and not image_url.startswith(('data:', 'javascript:')):
+                        logger.info(f"[1/8] Found OG image ({prop}): {image_url}")
+                        break
+                    else:
+                        og_image = None
+            
+            # 2. Try Twitter card image
+            if not image_url:
+                twitter_image = soup.find('meta', {'name': ['twitter:image', 'twitter:image:src']})
+                if twitter_image and twitter_image.get('content'):
+                    image_url = twitter_image.get('content', '').strip()
+                    if image_url and not image_url.startswith(('data:', 'javascript:')):
+                        logger.info(f"[2/6] Found Twitter image: {image_url}")
+                    else:
+                        image_url = None
+            
+            # 3. Try article:image meta tag
+            if not image_url:
+                article_image = soup.find('meta', {'property': 'article:image'})
+                if article_image and article_image.get('content'):
+                    image_url = article_image.get('content', '').strip()
+                    if image_url and not image_url.startswith(('data:', 'javascript:')):
+                        logger.info(f"[3/6] Found article:image: {image_url}")
+                    else:
+                        image_url = None
+            
+            # 4. Try JSON-LD data for image
+            if not image_url:
+                json_ld = soup.find('script', type='application/ld+json')
+                if json_ld:
+                    try:
+                        ld_data = json.loads(json_ld.string)
+                        if isinstance(ld_data, dict):
+                            if 'image' in ld_data:
+                                if isinstance(ld_data['image'], dict) and '@list' in ld_data['image']:
+                                    image_url = ld_data['image']['@list'][0]
+                                elif isinstance(ld_data['image'], str):
+                                    image_url = ld_data['image']
+                                elif isinstance(ld_data['image'], dict) and 'url' in ld_data['image']:
+                                    image_url = ld_data['image']['url']
+                                
+                                if image_url and not isinstance(image_url, str):
+                                    image_url = None
+                                
+                                if image_url and not image_url.startswith(('http://', 'https://')):
+                                    parsed_uri = urllib.parse.urlparse(url)
+                                    base_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
+                                    if image_url.startswith('/'):
+                                        image_url = f"{base_url}{image_url}"
+                                    else:
+                                        image_url = f"{base_url}/{image_url}"
+                                
+                                if image_url:
+                                    logger.info(f"[4/6] Found JSON-LD image: {image_url}")
+                    except Exception as e:
+                        logger.warning(f"Error parsing JSON-LD: {str(e)}")
+            
+            # 5. Try to find image in article body with common classes and attributes
+            if not image_url and article_body:
+                # Common image classes and attributes used in news articles
+                img_selectors = [
+                    # Common class names
+                    'img.article-image', 'img.wp-post-image', 'img.attachment-post-thumbnail',
+                    'img.entry-image', 'img.article-hero', 'img.article-featured-image',
+                    'img.article__image', 'img.article__hero', 'img.article__featured',
+                    'img.article__thumbnail', 'img.article__cover', 'img.article__header-image',
+                    'img.wp-image', 'img.size-full', 'img.attachment-full', 'img.attachment-large',
+                    'img.lazy', 'img.lazy-loaded', 'img.news-image', 'img.story-image',
+                    'img.featured-image', 'img.main-image', 'img.hero-image', 'img.lead-image',
+                    # Common data attributes
+                    'img[data-src]', 'img[data-lazy-src]', 'img[data-srcset]',
+                    # Common parent containers
+                    'figure.image img', 'div.image img', 'div.media img', 'div.photo img',
+                    'div.article-media img', 'div.article-image img', 'div.entry-media img',
+                    # Common image IDs
+                    'img#main-image', 'img#featured-image', 'img#hero-image',
+                    # Common data attributes in parent elements
+                    'div[data-image] img', 'div[data-src] img', 'figure[data-image] img'
+                ]
+                
+                for selector in img_selectors:
+                    try:
+                        elements = article_body.select(selector)
+                        for img in elements:
+                            # Try different attributes that might contain the image URL
+                            for attr in ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image', 'data-srcset']:
+                                src = img.get(attr, '').strip()
+                                if not src:
+                                    continue
+                                    
+                                # Clean and normalize the URL
+                                src = src.split('?')[0].split('#')[0].strip()
+                                
+                                # Handle relative URLs
+                                if src.startswith('//'):
+                                    src = f"{urllib.parse.urlparse(url).scheme}:{src}"
+                                elif src.startswith('/'):
+                                    src = f"{urllib.parse.urlparse(url).scheme}://{urllib.parse.urlparse(url).netloc}{src}"
+                                
+                                # Check if it's a valid image URL
+                                if (src.startswith(('http://', 'https://')) and 
+                                    any(ext in src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']) and
+                                    not any(ext in src.lower() for ext in ['logo', 'icon', 'avatar', 'spacer', 'pixel', 'placeholder'])):
+                                    image_url = src
+                                    logger.info(f"[5/8] Found image with selector {selector} (attr: {attr}): {image_url}")
+                                    break
+                            
+                            if image_url:
+                                break
+                                
+                    except Exception as e:
+                        logger.warning(f"Error processing selector {selector}: {str(e)}")
+                        continue
+                        
+                    if image_url:
+                        break
+            
+            # 6. Try to find first image in article body with size > 100px
+            if not image_url and article_body:
+                for img in article_body.find_all(['img', 'div', 'figure', 'picture', 'section', 'article']):
+                    try:
+                        # Try to get image URL from various attributes
+                        src = None
+                        
+                        # Check for different attributes that might contain the image URL
+                        for attr in ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image', 'data-srcset']:
+                            src = img.get(attr, '').strip()
+                            if src:
+                                break
+                        
+                        if not src or src.startswith(('data:', 'javascript:')) or any(ext in src.lower() for ext in ['.svg', '.gif', '.ico', 'logo', 'icon', 'avatar']):
+                            continue
+                        
+                        # Clean and normalize the URL
+                        src = src.split('?')[0].split('#')[0].strip()
+                        
+                        # Handle relative URLs
+                        if src.startswith('//'):
+                            src = f"{urllib.parse.urlparse(url).scheme}:{src}"
+                        elif src.startswith('/'):
+                            src = f"{urllib.parse.urlparse(url).scheme}://{urllib.parse.urlparse(url).netloc}{src}"
+                        
+                        # Check if it's a valid image URL
+                        if (src.startswith(('http://', 'https://')) and 
+                            any(ext in src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']) and
+                            not any(ext in src.lower() for ext in ['logo', 'icon', 'avatar', 'spacer', 'pixel', 'placeholder'])):
+                            image_url = src
+                            logger.info(f"[6/8] Found image in page: {image_url}")
+                            break
+                            
+                    except Exception as img_e:
+                        logger.debug(f"Skipping image processing: {str(img_e)}")
+                        continue
+            
+            # 1. Try Open Graph image
+            if not image_url:
+                og_image = soup.find('meta', property=['og:image', 'og:image:url'])
+                if og_image and og_image.get('content'):
+                    image_url = og_image['content']
+                    logger.info(f"[1/8] Found OG image: {image_url}")
+            
+            # 2. Try Twitter card image
+            if not image_url:
+                twitter_image = soup.find('meta', attrs={'name': ['twitter:image', 'twitter:image:src']})
+                if twitter_image and twitter_image.get('content'):
+                    image_url = twitter_image['content']
+                    logger.info(f"[2/8] Found Twitter image: {image_url}")
+            
+            # 3. Try article:image meta tag
+            if not image_url:
+                article_image = soup.find('meta', attrs={'property': 'article:image'})
+                if article_image and article_image.get('content'):
+                    image_url = article_image['content']
+                    logger.info(f"[3/8] Found article:image: {image_url}")
+            
+            # 4. Try JSON-LD data
+            if not image_url:
+                json_ld = soup.find('script', type='application/ld+json')
+                if json_ld:
+                    try:
+                        ld_data = json.loads(json_ld.string)
+                        if isinstance(ld_data, dict):
+                            if 'image' in ld_data:
+                                if isinstance(ld_data['image'], dict) and '@list' in ld_data['image']:
+                                    image_url = ld_data['image']['@list'][0] if ld_data['image']['@list'] else None
+                                elif isinstance(ld_data['image'], str):
+                                    image_url = ld_data['image']
+                                elif isinstance(ld_data['image'], dict) and 'url' in ld_data['image']:
+                                    image_url = ld_data['image']['url']
+                                if image_url:
+                                    logger.info(f"[4/8] Found JSON-LD image: {image_url}")
+                    except Exception as e:
+                        logger.warning(f"Error parsing JSON-LD: {str(e)}")
+            
+            # 5. Try to find first image in article body with size > 100px
+            if not image_url and article_body:
+                for img in article_body.find_all(['img', 'div', 'figure', 'picture']):
+                    try:
+                        # Try to get image URL from various attributes
+                        src = None
+                        for attr in ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image']:
+                            if img.has_attr(attr):
+                                src = img[attr].strip()
+                                if src and not src.startswith('data:') and not src.endswith(('.svg', '.gif')):
+                                    break
+                        
+                        if not src:
+                            # Check for picture/source elements
+                            source = img.find('source')
+                            if source and source.has_attr('srcset'):
+                                src = source['srcset'].split(',')[0].split(' ')[0].strip()
+                        
+                        if not src or not any(ext in src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+                            continue
+                            
+                        # Get image dimensions from attributes or style
+                        width = int(img.get('width', 0) or 0)
+                        height = int(img.get('height', 0) or 0)
+                        
+                        # Check image size from style if dimensions not in attributes
+                        if width <= 1 or height <= 1:
+                            style = img.get('style', '')
+                            size_matches = re.findall(r'width[\s:]+(\d+)px', style + ' ' + (img.get('width', '') or ''))
+                            if size_matches:
+                                width = int(size_matches[0])
+                            size_matches = re.findall(r'height[\s:]+(\d+)px', style + ' ' + (img.get('height', '') or ''))
+                            if size_matches:
+                                height = int(size_matches[0])
+                        
+                        # Skip if too small (unless we have no other choice)
+                        if width > 0 and height > 0 and (width < 50 or height < 50):
+                            continue
+                            
+                        # Skip if likely an icon/tracker (less strict now)
+                        src_lower = src.lower()
+                        if any(x in src_lower for x in ['icon', 'logo', 'pixel', 'spacer', '1x1', 'blank.gif', 'loading', 'placeholder', 'avatar']):
+                            continue
+                            
+                        # Convert relative URLs
+                        if src.startswith('/'):
+                            parsed_uri = urllib.parse.urlparse(url)
+                            base_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
+                            src = f"{base_url}{src}"
+                        elif src.startswith('//'):
+                            parsed_uri = urllib.parse.urlparse(url)
+                            src = f"{parsed_uri.scheme}:{src}"
+                            
+                        image_url = src
+                        logger.info(f"[5/8] Found suitable article image: {image_url} (Size: {width}x{height})")
+                        break
+                        
+                    except Exception as img_e:
+                        logger.warning(f"Error processing image tag: {str(img_e)}")
+                        continue
+            
+            # 6. Try to find any image in the article body (less strict)
+            if not image_url and article_body:
+                for img in article_body.find_all('img', {'src': True}):
+                    src = img.get('src', '').strip()
+                    if src and not src.startswith('data:') and not any(x in src.lower() for x in ['icon', 'logo', 'pixel']):
+                        image_url = src
+                        logger.info(f"[6/8] Found any image in article: {image_url}")
+                        break
+            
+            # 7. Try to find any image in the entire page as last resort
+            if not image_url:
+                for img in soup.find_all('img', {'src': True}):
+                    src = img.get('src', '').strip()
+                    if src and not src.startswith('data:') and not any(x in src.lower() for x in ['icon', 'logo', 'pixel']):
+                        image_url = src
+                        logger.info(f"[7/8] Found any image in page: {image_url}")
+                        break
+            
+            # 8. Try background images in article body
+            if not image_url and article_body:
+                for element in article_body.find_all(style=re.compile(r'background[-image]*\s*:', re.I)):
+                    style = element.get('style', '')
+                    match = re.search(r'url\s*\(\s*["\']?(.*?)["\']?\s*\)', style, re.I)
+                    if match:
+                        bg_url = match.group(1).strip('"\'')
+                        if bg_url and not bg_url.startswith('data:') and any(ext in bg_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+                            image_url = bg_url
+                            logger.info(f"[8/8] Found background image: {image_url}")
+                            break
+            
+            # Clean and normalize the URL if found
+            if image_url:
+                # Remove query parameters and fragments
+                image_url = image_url.split('?')[0].split('#')[0].strip()
+                
+                # Convert relative URLs to absolute
+                if image_url.startswith('//'):
+                    image_url = f'https:{image_url}'
+                elif image_url.startswith('/'):
+                    parsed_uri = urllib.parse.urlparse(url)
+                    image_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}{image_url}"
+                elif not image_url.startswith(('http://', 'https://')):
+                    # Handle relative URLs without leading slash
+                    parsed_uri = urllib.parse.urlparse(url)
+                    base_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
+                    path = parsed_uri.path.rsplit('/', 1)[0] if '/' in parsed_uri.path else ''
+                    image_url = f"{base_url}{'/' if path and not path.endswith('/') else ''}{path}/{image_url}"
+                
+                logger.info(f"✅ Final image URL: {image_url}")
+            else:
+                logger.warning(f"❌ No image found for {url}")
+                
+                # Log potential image sources for debugging
+                if article_body:
+                    all_imgs = article_body.find_all('img', {'src': True})
+                    logger.info(f"Found {len(all_imgs)} potential image(s) in article body")
+                    for i, img in enumerate(all_imgs[:5], 1):
+                        logger.info(f"  {i}. {img.get('src', '')}")
+                        
+                    # Also log any background images
+                    bg_images = []
+                    for el in article_body.find_all(style=re.compile(r'background[-image]*\s*:', re.I)):
+                        style = el.get('style', '')
+                        match = re.search(r'url\s*\(\s*["\']?(.*?)["\']?\s*\)', style, re.I)
+                        if match:
+                            bg_images.append(match.group(1).strip('"\''))
+                    
+                    if bg_images:
+                        logger.info(f"Found {len(bg_images)} background images:")
+                        for i, bg in enumerate(bg_images[:3], 1):
+                            logger.info(f"  BG {i}. {bg}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error extracting image URL from {url}: {str(e)}", exc_info=True)
+            image_url = None
         
         # Extract publish date with better parsing
         publish_date = None
@@ -182,7 +806,8 @@ def extract_article_content(url: str) -> Optional[Dict[str, str]]:
             'content': text,
             'publish_date': publish_date or datetime.now().strftime('%Y-%m-%d'),
             'url': url,
-            'source': urllib.parse.urlparse(url).netloc
+            'source': urllib.parse.urlparse(url).netloc,
+            'image_url': image_url
         }
         
     except Exception as e:
@@ -319,23 +944,7 @@ def search_rss_feeds(query: str, max_articles: int = 20) -> List[Dict[str, str]]
                     logger.info(f"✅ MATCH FOUND: '{match.group(0)}' in text")
                     logger.info(f"   Context: ...{search_text[max(0, match.start()-30):match.end()+30]}...")
                     
-                    # Extract content for matching articles only
-                    content = ''
-                    if hasattr(entry, 'content') and entry.content:
-                        content = entry.content[0].get('value', '') if isinstance(entry.content, list) else ''
-                    
-                    # Fetch the full article for better content (only for matching articles)
-                    try:
-                        article_data = extract_article_content(url)
-                        if article_data and article_data.get('content'):
-                            articles.append(article_data)
-                            processed_urls.add(url)
-                            logger.info(f"Found article: {article_data.get('title')}")
-                            continue
-                    except Exception as e:
-                        logger.warning(f"Error extracting article content from {url}: {e}")
-                    
-                    # If we couldn't get the full article, use the entry data
+                    # Initialize article data with basic info
                     entry_data = {
                         'title': title,
                         'url': url,
@@ -345,20 +954,39 @@ def search_rss_feeds(query: str, max_articles: int = 20) -> List[Dict[str, str]]
                         'author': author if author else 'Unknown',
                         'sentiment': None,
                         'sentiment_score': None,
-                        'summary': None
+                        'summary': None,
+                        'image_url': None
                     }
                     
-                    # Process publish date
+                    # Set default publish date from entry if available
                     if hasattr(entry, 'published_parsed') and entry.published_parsed:
                         try:
                             entry_data['published'] = datetime(*entry.published_parsed[:6]).strftime('%Y-%m-%d')
                         except Exception as e:
                             logger.warning(f"Error parsing publish date: {e}")
                     
+                    # Try to extract full article content and image
+                    try:
+                        article_data = extract_article_content(url)
+                        if article_data:
+                            # Update entry data with extracted content and image
+                            if article_data.get('content'):
+                                entry_data['content'] = article_data['content']
+                            if article_data.get('image_url'):
+                                entry_data['image_url'] = article_data['image_url']
+                            if article_data.get('publish_date') and not entry_data.get('published'):
+                                entry_data['published'] = article_data['publish_date']
+                    except Exception as e:
+                        logger.warning(f"Error extracting article content from {url}: {e}")
+                    
+                    # Ensure we have at least the basic content
+                    if not entry_data.get('content'):
+                        entry_data['content'] = f"No content available. Please visit the source: {url}"
+                    
                     # Add the entry data to articles list
                     articles.append(entry_data)
                     processed_urls.add(url)
-                    logger.info(f"Found article: {title}")
+                    logger.info(f"Found article: {title} - Image: {'Yes' if entry_data.get('image_url') else 'No'}")
                         
                 except Exception as e:
                     logger.error(f"Error processing entry: {e}")

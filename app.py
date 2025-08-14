@@ -3,7 +3,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import time
 import os
+import logging
+import requests
+import urllib.parse
 from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
 from news_fetcher3 import get_news_about  # Import our new RSS fetcher
 from sentiment_analysis import analyze_sentiment  # Import the sentiment analysis function
 from summarizer import generate_overall_summary  # Import the summarizer function
@@ -11,6 +15,10 @@ from tts import translate_and_generate_audio  # Import the TTS function
 from auth_ui import show_login_form, show_register_form, show_logout_button, get_current_user, require_login, require_admin
 from models import log_search  # Import the search logging function
 import asyncio
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Set up the Streamlit app title
 st.set_page_config(page_title="News Sentiment Analysis", layout="wide")
@@ -214,10 +222,140 @@ else:
             for article in articles_by_date[date]:
                 # Process all articles
                 with st.expander(f"📰 {article['title']}"):
-                    st.write(f"**URL:** {article['url']}")
-                    st.write(f"**Published Date:** {article.get('publish_date', 'Unknown date')}")
-                    st.write(f"**Source:** {article.get('source', 'Unknown source')}")
-                    st.write(f"**Content Preview:** {article['content'][:200]}...")  # Show first 200 chars of content
+                    # Always create columns for consistent layout
+                    col1, col2 = st.columns([1, 2])
+                    
+                    # Display image in first column if available
+                    with col1:
+                        image_shown = False
+                        
+                        # Log all available article keys for debugging
+                        logger.info(f"\n{'='*40} ARTICLE DATA {'='*40}")
+                        for key, value in article.items():
+                            if key not in ['content']:  # Skip content to keep logs clean
+                                logger.info(f"{key}: {value}")
+                        
+                        # Try multiple image sources
+                        image_sources = [
+                            ('image_url', article.get('image_url')),
+                            ('enclosure', article.get('enclosure')),
+                            ('media_content', article.get('media_content', [{}])[0].get('url') if isinstance(article.get('media_content'), list) and len(article.get('media_content', [])) > 0 else None),
+                            ('media_thumbnail', article.get('media_thumbnail')),
+                            ('enclosure_url', article.get('enclosure', {}).get('url') if isinstance(article.get('enclosure'), dict) else None),
+                            ('media_content_url', article.get('media_content', [{}])[0].get('url') if isinstance(article.get('media_content'), list) and len(article.get('media_content', [])) > 0 else None)
+                        ]
+                        
+                        logger.info("\nChecking image sources:")
+                        for src_name, src_url in image_sources:
+                            logger.info(f"{src_name}: {src_url}")
+                        
+                        for src_name, img_url in image_sources:
+                            if not img_url:
+                                logger.debug(f"Skipping empty {src_name}")
+                                continue
+                                
+                            try:
+                                # Clean up the URL
+                                img_url = str(img_url).strip()
+                                
+                                # Handle relative URLs
+                                if img_url.startswith('//'):
+                                    img_url = f"https:{img_url}"
+                                elif img_url.startswith('/'):
+                                    parsed_uri = urllib.parse.urlparse(article['url'])
+                                    img_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}{img_url}"
+                                
+                                # Skip non-image URLs
+                                # Check if URL looks like an image
+                                is_image_url = any(ext in img_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp', 'image/', 'flickr.com', 'img.'])
+                                logger.info(f"Checking if URL is an image: {img_url} -> {'Yes' if is_image_url else 'No'}")
+                                if not is_image_url:
+                                    logger.debug(f"Skipping non-image URL: {img_url}")
+                                    continue
+                                
+                                # Try to display the image
+                                st.image(
+                                    img_url,
+                                    width=200,
+                                    use_container_width=True,
+                                    caption=f"Source: {article.get('source', 'Article')}",
+                                    output_format='JPEG'
+                                )
+                                
+                                logger.info(f"✅ Successfully displayed image: {img_url}")
+                                image_shown = True
+                                break  # Stop after first successful image
+                                
+                            except Exception as img_error:
+                                logger.debug(f"Skipping image {img_url}: {str(img_error)}")
+                                continue
+                        
+                        # Only show "No image available" if we really couldn't find any image
+                        if not image_shown:
+                            logger.info(f"ℹ️ No suitable image found in initial sources. Tried {len([x for x in image_sources if x[1]])} potential image sources.")
+                            
+                            # Try one more time with a direct image from the article URL if available
+                            try:
+                                if article.get('url'):
+                                    logger.info(f"Trying to extract image directly from article URL: {article['url']}")
+                                    response = requests.get(article['url'], timeout=10)
+                                    soup = BeautifulSoup(response.text, 'html.parser')
+                                    
+                                    # Try common image selectors in order of preference
+                                    for selector in ['meta[property="og:image"]', 'meta[name="twitter:image"]', 'img']:
+                                        if image_shown:  # Skip if we've already found an image
+                                            break
+                                            
+                                        for img in soup.select(selector):
+                                            if image_shown:  # Skip if we've already found an image
+                                                break
+                                                
+                                            img_src = img.get('content') or img.get('src')
+                                            if not img_src:
+                                                continue
+                                                
+                                            # Make URL absolute if it's relative
+                                            try:
+                                                if img_src.startswith('//'):
+                                                    img_src = f'https:{img_src}'
+                                                elif img_src.startswith('/'):
+                                                    parsed_uri = urllib.parse.urlparse(article['url'])
+                                                    img_src = f"{parsed_uri.scheme}://{parsed_uri.netloc}{img_src}"
+                                                
+                                                # Only proceed if it looks like an image URL
+                                                if not any(ext in img_src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp', 'image/']):
+                                                    continue
+                                                
+                                                # Try to display the image
+                                                st.image(
+                                                    img_src,
+                                                    width=200,
+                                                    use_container_width=True,
+                                                    caption=f"Source: {article.get('source', 'Article')}",
+                                                    output_format='JPEG'
+                                                )
+                                                logger.info(f"✅ Successfully displayed fallback image: {img_src}")
+                                                image_shown = True
+                                                break  # Stop after first successful image
+                                                
+                                            except Exception as e:
+                                                logger.debug(f"Couldn't display fallback image {img_src}: {str(e)}")
+                                                continue
+                            
+                            except Exception as e:
+                                logger.warning(f"Error in fallback image extraction: {str(e)}")
+                            
+                            # Only show the message if we still don't have an image
+                            if not image_shown:
+                                logger.info("ℹ️ No fallback image found either")
+                                st.info("No image available for this article")
+                    
+                    # Always display details in second column
+                    with col2:
+                        st.write(f"**URL:** {article['url']}")
+                        st.write(f"**Published Date:** {article.get('publish_date', 'Unknown date')}")
+                        st.write(f"**Source:** {article.get('source', 'Unknown source')}")
+                        st.write(f"**Content Preview:** {article['content'][:200]}...")  # Show first 200 chars of content
                 
                     try:
                         with st.spinner("Analyzing sentiment..."):
