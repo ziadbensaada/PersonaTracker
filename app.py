@@ -617,7 +617,7 @@ if user:
 # Main app header (only shown if not redirected to admin)
 st.markdown("""
 <div class="main-header">
-    <h1 class="main-title">News Sentiment Analysis</h1>
+    <h1 class="main-title">PersonaTracker</h1>
     <p class="main-subtitle">AI-Powered Media Intelligence Platform</p>
 </div>
 """, unsafe_allow_html=True)
