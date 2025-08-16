@@ -688,8 +688,7 @@ if user:
             date_range = st.sidebar.selectbox(
                 "Date Range",
                 ["Last 24 hours", "Last 7 days", "Last 30 days", "All time"],
-                index=1,
-                key="personalized_feed_date_range"
+                index=1
             )
             
             # Get user's interests
@@ -702,71 +701,39 @@ if user:
             # Show user's interests
             st.write(f"### Your Interests: {', '.join(user_interests)}")
             
-            # Add loading state
-            with st.spinner('Fetching the latest articles...'):
-                # Fetch and display articles for each interest
-                for interest in user_interests:
+            # Fetch and display articles for each interest
+            for interest in user_interests:
+                st.subheader(f"{interest} News")
+                
+                # Get articles for this domain
+                articles = get_articles_by_domains([interest])
+                
+                if not articles:
+                    st.info(f"No articles found for {interest}.")
+                    continue
+                    
+                # Display articles
+                for article in articles:
                     with st.container():
-                        st.subheader(f"{interest} News")
+                        col1, col2 = st.columns([1, 3])
                         
-                        # Get articles for this domain with date filtering
-                        articles = get_articles_by_domains([interest], date_range=date_range)
+                        with col1:
+                            if article.get('image_url'):
+                                st.image(article['image_url'], width=150)
                         
-                        if not articles:
-                            st.info(f"No articles found for {interest} in the selected date range.")
-                            st.markdown("---")
-                            continue
+                        with col2:
+                            st.markdown(f"### [{article.get('title', 'No title')}]({article.get('url', '#')})")
                             
-                        # Display articles
-                        for article in articles:
-                            with st.container():
-                                # Create columns for image and content
-                                col1, col2 = st.columns([1, 3])
+                            if article.get('source'):
+                                st.caption(f"Source: {article['source']}")
                                 
-                                with col1:
-                                    # Display image with error handling
-                                    img_url = article.get('image_url') or article.get('url_to_image')
-                                    if img_url:
-                                        try:
-                                            st.image(
-                                                img_url,
-                                                width=200,
-                                                use_container_width=True,
-                                                caption='',
-                                                output_format='JPEG'
-                                            )
-                                        except Exception as e:
-                                            st.warning("Couldn't load image")
+                            if article.get('publish_date'):
+                                st.caption(f"Published: {article['publish_date']}")
                                 
-                                with col2:
-                                    # Display title as a clickable link
-                                    title = article.get('title', 'No title')
-                                    url = article.get('url', '#')
-                                    st.markdown(f"### [{title}]({url})")
-                                    
-                                    # Display source and date
-                                    source = article.get('source')
-                                    if isinstance(source, dict):
-                                        source = source.get('name', 'Unknown source')
-                                    
-                                    pub_date = article.get('publish_date') or article.get('publishedAt')
-                                    if pub_date:
-                                        try:
-                                            if isinstance(pub_date, str):
-                                                pub_date = datetime.strptime(pub_date, '%Y-%m-%dT%H:%M:%SZ')
-                                            pub_date = pub_date.strftime('%B %d, %Y')
-                                            st.caption(f"{source} • {pub_date}")
-                                        except:
-                                            st.caption(f"{source}" if source else "")
-                                    
-                                    # Display summary or content
-                                    summary = article.get('summary') or article.get('description') or article.get('content', '')
-                                    if summary:
-                                        # Clean up the summary text
-                                        summary = ' '.join(summary.split()[:100])  # Limit to first 100 words
-                                        st.write(summary + '...' if len(summary) > 100 else summary)
-                                
-                                st.markdown("---")
+                            if article.get('summary'):
+                                st.write(article['summary'])
+                        
+                        st.markdown("---")
         
         show_personalized_articles(user)
     else:
@@ -1420,6 +1387,6 @@ else:
 # Professional footer
 st.markdown("""
 <div class="professional-footer">
-    <p>Powered by Advanced AI Analytics | Professional News Intelligence Platform</p>
+    <p>Powered by Ziad Ben Saada | Professional News Intelligence Platform</p>
 </div>
 """, unsafe_allow_html=True)

@@ -42,12 +42,13 @@ if menu == "User Management":
     # Get all users
     users = list(users_collection.find({}, {"password": 0}))  # Exclude passwords
     
-    # Display users in a table
+    # Display users in a table with actions
     if users:
-        # Convert to DataFrame for better display
+        # Convert to DataFrame for display
         user_data = []
         for user in users:
             user_data.append({
+                "_id": str(user['_id']),
                 "Username": user['username'],
                 "Email": user.get('email', ''),
                 "Role": user.get('role', 'user'),
@@ -58,18 +59,83 @@ if menu == "User Management":
                               if user.get('last_login') else 'Never'
             })
         
-        st.dataframe(
+        # Display users in a data editor for inline editing
+        edited_users = st.data_editor(
             user_data,
             column_config={
+                "_id": None,  # Hide the _id column
                 "Active": st.column_config.CheckboxColumn(
                     "Active",
                     help="User account status",
-                    default=True,
+                    disabled=[u['Username'] == 'admin' for u in user_data]  # Disable for admin
+                ),
+                "Role": st.column_config.SelectboxColumn(
+                    "Role",
+                    help="User role",
+                    options=["user", "admin"],
+                    required=True,
+                    disabled=[u['Username'] == 'admin' for u in user_data]  # Disable for admin
                 )
             },
             hide_index=True,
-            use_container_width=True
+            use_container_width=True,
+            key="user_editor"
         )
+        
+        # Add update and delete buttons
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("Update Users", use_container_width=True):
+                for edited_user in edited_users:
+                    user_id = edited_user['_id']
+                    original_user = next((u for u in users if str(u['_id']) == user_id), None)
+                    
+                    if original_user and original_user['username'] == 'admin' and st.session_state.user.get('username') != 'admin':
+                        st.error("Only the admin can update admin user")
+                        continue
+                        
+                    # Check for changes
+                    changes = {}
+                    if edited_user['Active'] != original_user.get('is_active', True):
+                        changes['is_active'] = edited_user['Active']
+                    if edited_user['Role'] != original_user.get('role', 'user'):
+                        changes['role'] = edited_user['Role']
+                    
+                    # Update if there are changes
+                    if changes:
+                        try:
+                            users_collection.update_one(
+                                {"_id": ObjectId(user_id)},
+                                {"$set": changes}
+                            )
+                            st.success(f"Updated user: {edited_user['Username']}")
+                        except Exception as e:
+                            st.error(f"Error updating user {edited_user['Username']}: {str(e)}")
+        
+        with col2:
+            # Add a selectbox for user deletion
+            users_to_delete = st.multiselect(
+                "Select users to delete",
+                [f"{u['Username']} ({u['Email']})" for u in edited_users if u['Username'] != 'admin'],
+                key="users_to_delete"
+            )
+            
+            if st.button("Delete Selected Users", type="secondary", use_container_width=True):
+                for user_str in users_to_delete:
+                    username = user_str.split(" (")[0]  # Extract username from the display string
+                    user_to_delete = next((u for u in users if u['username'] == username), None)
+                    
+                    if user_to_delete and user_to_delete['username'] == 'admin':
+                        st.error("Cannot delete the admin user")
+                        continue
+                        
+                    try:
+                        users_collection.delete_one({"username": username})
+                        st.success(f"Deleted user: {username}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error deleting user {username}: {str(e)}")
     else:
         st.info("No users found in the database.")
     
@@ -81,16 +147,28 @@ if menu == "User Management":
             with col1:
                 new_username = st.text_input("Username")
                 new_email = st.text_input("Email")
+                
+                # Get available interests from models
+                from models import AVAILABLE_DOMAINS
+                new_interests = st.multiselect(
+                    "Select Interests",
+                    options=AVAILABLE_DOMAINS,
+                    help="Select areas of interest for the user"
+                )
             
             with col2:
                 new_password = st.text_input("Password", type="password")
                 new_role = st.selectbox("Role", ["user", "admin"])
+                
+                # Add some spacing
+                st.markdown("<br><br>", unsafe_allow_html=True)
+                st.markdown("<br>", unsafe_allow_html=True)
             
-            submitted = st.form_submit_button("Add User")
+            submitted = st.form_submit_button("Add User", use_container_width=True)
             
             if submitted:
                 if not all([new_username, new_email, new_password]):
-                    st.error("All fields are required")
+                    st.error("Username, email, and password are required")
                 else:
                     # Check if username or email already exists
                     if users_collection.find_one({"$or": [
@@ -105,7 +183,8 @@ if menu == "User Management":
                             username=new_username,
                             email=new_email,
                             password=new_password,
-                            role=new_role
+                            role=new_role,
+                            interests=new_interests if new_interests else []
                         )
                         
                         if user_id:
@@ -188,6 +267,36 @@ elif menu == "Search Analytics":
         user_map = {}
         for user_id in user_ids:
             user_map[user_id] = get_username(user_id)
+        
+        # Search history management
+        st.subheader("Search History Management")
+        
+        # Add date range filter for deletion
+        st.markdown("### Delete Search History")
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            delete_query = st.text_input("Filter by query (leave empty for all)", key="delete_query")
+        
+        with col2:
+            st.markdown("###")
+            if st.button("Delete Matching Searches", type="secondary"):
+                query_filter = {
+                    "timestamp": {
+                        "$gte": datetime.combine(start_date, datetime.min.time()),
+                        "$lte": datetime.combine(end_date, datetime.max.time())
+                    }
+                }
+                
+                if delete_query:
+                    query_filter["query"] = {"$regex": delete_query, "$options": "i"}
+                
+                try:
+                    result = search_history_collection.delete_many(query_filter)
+                    st.success(f"Deleted {result.deleted_count} search history entries")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error deleting search history: {str(e)}")
         
         # Recent searches with expandable article details
         st.subheader("Recent Searches")
