@@ -32,7 +32,7 @@ st.write(f"Welcome, {user['username']} (Admin)")
 st.sidebar.title("Admin Menu")
 menu = st.sidebar.radio(
     "Navigation",
-    ["User Management", "Search Analytics", "System Status"]
+    ["User Management", "RSS Feed Management", "Search Analytics", "System Status"]
 )
 
 # User Management Tab
@@ -365,8 +365,119 @@ elif menu == "Search Analytics":
     else:
         st.info("No search history found for the selected date range.")
 
+# RSS Feed Management Tab
+elif menu == "RSS Feed Management":
+    st.header("RSS Feed Management")
+    
+    # Add new RSS feed form
+    with st.expander("Add New RSS Feed", expanded=True):
+        with st.form("add_feed_form"):
+            feed_url = st.text_input("RSS Feed URL", help="Full URL to the RSS feed")
+            is_active = st.checkbox("Active", value=True)
+            
+            submitted = st.form_submit_button("Add Feed", use_container_width=True)
+            
+            if submitted:
+                if not feed_url:
+                    st.error("URL is required")
+                else:
+                    from models import add_rss_feed
+                    feed_id, error = add_rss_feed(
+                        url=feed_url,
+                        is_active=is_active
+                    )
+                    
+                    if feed_id:
+                        st.success(f"Added feed: {feed_url}")
+                        st.rerun()
+                    else:
+                        st.error(f"Error adding feed: {error}")
+    
+    # List of existing feeds with edit/delete options
+    st.subheader("Manage Existing Feeds")
+    from models import get_rss_feeds, update_rss_feed, delete_rss_feed
+    
+    feeds = get_rss_feeds(active_only=False)
+    
+    if not feeds:
+        st.info("No RSS feeds found. Add one using the form above.")
+    else:
+        # Create a list of feed dictionaries for the data editor
+        feed_data = []
+        for feed in feeds:
+            feed_data.append({
+                "id": feed['_id'],
+                "URL": feed['url'],
+                "Active": feed.get('is_active', True),
+                "Status": "✅" if feed.get('is_active') else "❌"
+            })
+        
+        # Display feeds in an editable table
+        col1, col2 = st.columns([4, 1])
+        
+        with col1:
+            edited_feeds = st.data_editor(
+                feed_data,
+                column_config={
+                    "id": None,
+                    "Status": st.column_config.TextColumn("Status", width="small"),
+                    "Active": st.column_config.CheckboxColumn("Active", width="small"),
+                    "URL": st.column_config.TextColumn("URL", width="large")
+                },
+                hide_index=True,
+                use_container_width=True,
+                key="feed_editor"
+            )
+        
+        with col2:
+            st.markdown("###")
+            if st.button("Save Changes", use_container_width=True):
+                with st.spinner("Updating feeds..."):
+                    success_count = 0
+                    for edited in edited_feeds:
+                        original = next((f for f in feeds if f['_id'] == edited['id']), None)
+                        if not original:
+                            continue
+                            
+                        updates = {}
+                        if edited['URL'] != original['url']:
+                            updates['url'] = edited['URL']
+                        if edited['Active'] != original.get('is_active', True):
+                            updates['is_active'] = edited['Active']
+                        
+                        if updates:
+                            success, error = update_rss_feed(edited['id'], **updates)
+                            if success:
+                                success_count += 1
+                            else:
+                                st.error(f"Error updating {edited['URL']}: {error}")
+                                st.error(f"Error updating {edited['Name']}: {error}")
+                    
+                    if success_count > 0:
+                        st.success(f"Updated {success_count} feed(s)")
+                        st.rerun()
+            
+            # Delete selected feeds
+            feeds_to_delete = st.multiselect(
+                "Select feeds to delete",
+                [f['URL'] for f in feed_data],
+                key="feeds_to_delete"
+            )
+            
+            if st.button("Delete Selected", type="secondary", use_container_width=True):
+                for feed_url in feeds_to_delete:
+                    feed = next((f for f in feed_data if f['URL'] == feed_url), None)
+                    
+                    if feed:
+                        success, error = delete_rss_feed(feed['id'])
+                        if success:
+                            st.success(f"Deleted feed: {feed_url}")
+                            st.rerun()
+                        else:
+                            st.error(f"Error deleting {feed_url}: {error}")
+
 # System Status Tab
-else:
+elif menu == "System Status":
     st.header("System Status")
     
     # Basic system info
