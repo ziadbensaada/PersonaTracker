@@ -4,9 +4,17 @@ from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 import bcrypt
 from dotenv import load_dotenv
+from typing import List, Optional, Tuple
 
 # Load environment variables
 load_dotenv()
+
+# Available domains for user interests
+AVAILABLE_DOMAINS = [
+    'Technology', 'Business', 'Science', 'Health',
+    'Entertainment', 'Sports', 'Politics', 'Education',
+    'Environment', 'Finance', 'Travel', 'Food', 'Fashion'
+]
 
 # MongoDB connection
 MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
@@ -56,14 +64,15 @@ def verify_user(username: str, password: str):
         print(f"Error in verify_user: {str(e)}")
         return None
 
-def create_user(username: str, email: str, password: str, role: str = 'user'):
-    """Create a new user with hashed password.
+def create_user(username: str, email: str, password: str, role: str = 'user', interests: Optional[List[str]] = None) -> Tuple[Optional[str], Optional[str]]:
+    """Create a new user with hashed password and optional interests.
     
     Args:
         username: Unique username
         email: User's email
         password: Plain text password
         role: User role (default: 'user')
+        interests: List of domain interests (default: [])
         
     Returns:
         tuple: (user_id, error_message) - user_id is None if creation failed
@@ -72,6 +81,12 @@ def create_user(username: str, email: str, password: str, role: str = 'user'):
         # Check if username or email already exists
         if users_collection.find_one({"$or": [{"username": username}, {"email": email}]}):
             return None, "Username or email already exists"
+            
+        # Validate interests if provided
+        if interests:
+            invalid_interests = [i for i in interests if i not in AVAILABLE_DOMAINS]
+            if invalid_interests:
+                return None, f"Invalid interests: {', '.join(invalid_interests)}. Must be one of: {', '.join(AVAILABLE_DOMAINS)}"
         
         # Hash the password
         password_bytes = password.encode('utf-8')
@@ -83,6 +98,7 @@ def create_user(username: str, email: str, password: str, role: str = 'user'):
             "email": email,
             "password": hashed_password,
             "role": role,
+            "interests": interests if interests else [],
             "is_active": True,
             "created_at": datetime.utcnow(),
             "last_login": None

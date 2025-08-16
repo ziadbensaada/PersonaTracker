@@ -1,5 +1,5 @@
 import streamlit as st
-from models import verify_user, create_user, get_user
+from models import verify_user, create_user, get_user, AVAILABLE_DOMAINS
 from datetime import datetime
 
 def show_login_form():
@@ -31,40 +31,71 @@ def show_login_form():
     return None
 
 def show_register_form():
-    """Display registration form and handle user registration."""
-    st.title("Create an Account")
-    
+    """Display the registration form with domain interests selection."""
     with st.form("register_form"):
+        st.subheader("Create a New Account")
+        
         username = st.text_input("Username")
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
         confirm_password = st.text_input("Confirm Password", type="password")
-        submit_button = st.form_submit_button("Register")
-    
-    if submit_button:
-        # Validate input
-        if not all([username, email, password, confirm_password]):
-            st.error("All fields are required")
-            return None
+        
+        # Add domain interests selection
+        st.subheader("Select Your Interests")
+        st.write("Choose at least one domain you're interested in:")
+        
+        # Create two columns for better layout
+        col1, col2 = st.columns(2)
+        
+        # Get available domains from models
+        from models import AVAILABLE_DOMAINS
+        
+        # Split domains into two columns
+        half = len(AVAILABLE_DOMAINS) // 2
+        interests = []
+        
+        with col1:
+            for domain in AVAILABLE_DOMAINS[:half]:
+                if st.checkbox(domain, key=f"int_{domain}"):
+                    interests.append(domain)
+                    
+        with col2:
+            for domain in AVAILABLE_DOMAINS[half:]:
+                if st.checkbox(domain, key=f"int_{domain}"):
+                    interests.append(domain)
+        
+        if st.form_submit_button("Register"):
+            if not all([username, email, password, confirm_password]):
+                st.error("All fields are required!")
+                return False
+                
+            if password != confirm_password:
+                st.error("Passwords do not match!")
+                return False
+                
+            if len(password) < 8:
+                st.error("Password must be at least 8 characters long!")
+                return False
+                
+            if not interests:
+                st.error("Please select at least one area of interest")
+                return False
             
-        if password != confirm_password:
-            st.error("Passwords do not match")
-            return None
+            # Create the user with interests
+            user_id, error = create_user(
+                username=username,
+                email=email,
+                password=password,
+                interests=interests
+            )
             
-        if len(password) < 8:
-            st.error("Password must be at least 8 characters long")
-            return None
-            
-        # Create user
-        user_id, error = create_user(username, email, password)
-        if user_id:
-            st.success("Account created successfully! Please log in.")
-            return True
-        else:
-            st.error(f"Error creating account: {error}")
-            return False
-    
-    return None
+            if user_id:
+                st.success("Registration successful! Please log in.")
+                return True
+            else:
+                st.error(f"Registration failed: {error}")
+                return False
+    return False
 
 def show_logout_button():
     """Display logout button and handle logout."""

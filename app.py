@@ -587,6 +587,14 @@ if not st.session_state.get('authenticated'):
 # User is authenticated, get user info
 user = get_current_user()
 
+# Navigation
+st.sidebar.title("Navigation")
+page = st.sidebar.radio(
+    "Go to",
+    ["Personalized Feed", "Search Articles"],
+    index=0
+)
+
 # Professional sidebar with user info and logout
 if user:
     st.sidebar.markdown(f"""
@@ -596,14 +604,174 @@ if user:
     </div>
     """, unsafe_allow_html=True)
     
+    # Show user's interests in sidebar
+    if user.get('interests'):
+        st.sidebar.markdown("### Your Interests")
+        for interest in user.get('interests', []):
+            st.sidebar.markdown(f"- {interest}")
+    
     # Check if user is admin
     is_admin = user.get('role') == 'admin'
     if is_admin:
-        st.sidebar.success("Administrator Access")
-        # Add admin dashboard link in sidebar for admin users only
         st.sidebar.markdown("---")
+        st.sidebar.success("Administrator Access")
         if st.sidebar.button("Admin Dashboard", use_container_width=True):
             st.switch_page("pages/admin_dashboard.py")
+    
+    # Add logout button at the bottom
+    st.sidebar.markdown("---")
+    if st.sidebar.button("Logout", type="primary", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
+    
+    # Main content based on navigation
+    if page == "Personalized Feed":
+        def get_articles_by_domains(domains, date_range="Last 7 days"):
+            """
+            Fetch articles based on the given domains and date range.
+            
+            Args:
+                domains: List of domain interests to search for
+                date_range: String indicating the date range filter
+                
+            Returns:
+                List of articles matching the domains and date range
+            """
+            articles = []
+            processed_urls = set()
+            
+            # Convert date range to start_date and end_date
+            end_date = datetime.now()
+            if date_range == "Last 24 hours":
+                start_date = end_date - timedelta(days=1)
+            elif date_range == "Last 7 days":
+                start_date = end_date - timedelta(days=7)
+            elif date_range == "Last 30 days":
+                start_date = end_date - timedelta(days=30)
+            else:  # All time
+                start_date = None
+            
+            # Format dates as strings for the API
+            start_date_str = start_date.strftime('%Y-%m-%d') if start_date else None
+            end_date_str = end_date.strftime('%Y-%m-%d')
+            
+            # Search for articles for each domain
+            for domain in domains:
+                try:
+                    # Use the existing news fetching function with the domain as query
+                    domain_articles = get_news_about(
+                        query=domain,
+                        max_articles=20,  # Limit per domain
+                        start_date=start_date_str,
+                        end_date=end_date_str
+                    )
+                    
+                    # Add articles to the results, avoiding duplicates
+                    for article in domain_articles:
+                        if article.get('url') and article['url'] not in processed_urls:
+                            # Add domain information to the article
+                            article['domain'] = domain
+                            articles.append(article)
+                            processed_urls.add(article['url'])
+                    
+                except Exception as e:
+                    st.error(f"Error fetching articles for {domain}: {str(e)}")
+            
+            return articles
+
+        def show_personalized_articles(user):
+            """Display articles based on user's interests."""
+            st.title("Your Personalized News Feed")
+            
+            # Add date range filter
+            st.sidebar.subheader("Filter Articles")
+            date_range = st.sidebar.selectbox(
+                "Date Range",
+                ["Last 24 hours", "Last 7 days", "Last 30 days", "All time"],
+                index=1,
+                key="personalized_feed_date_range"
+            )
+            
+            # Get user's interests
+            user_interests = user.get('interests', [])
+            
+            if not user_interests:
+                st.warning("You haven't selected any interests yet. Please update your profile to get personalized news.")
+                return
+            
+            # Show user's interests
+            st.write(f"### Your Interests: {', '.join(user_interests)}")
+            
+            # Add loading state
+            with st.spinner('Fetching the latest articles...'):
+                # Fetch and display articles for each interest
+                for interest in user_interests:
+                    with st.container():
+                        st.subheader(f"{interest} News")
+                        
+                        # Get articles for this domain with date filtering
+                        articles = get_articles_by_domains([interest], date_range=date_range)
+                        
+                        if not articles:
+                            st.info(f"No articles found for {interest} in the selected date range.")
+                            st.markdown("---")
+                            continue
+                            
+                        # Display articles
+                        for article in articles:
+                            with st.container():
+                                # Create columns for image and content
+                                col1, col2 = st.columns([1, 3])
+                                
+                                with col1:
+                                    # Display image with error handling
+                                    img_url = article.get('image_url') or article.get('url_to_image')
+                                    if img_url:
+                                        try:
+                                            st.image(
+                                                img_url,
+                                                width=200,
+                                                use_container_width=True,
+                                                caption='',
+                                                output_format='JPEG'
+                                            )
+                                        except Exception as e:
+                                            st.warning("Couldn't load image")
+                                
+                                with col2:
+                                    # Display title as a clickable link
+                                    title = article.get('title', 'No title')
+                                    url = article.get('url', '#')
+                                    st.markdown(f"### [{title}]({url})")
+                                    
+                                    # Display source and date
+                                    source = article.get('source')
+                                    if isinstance(source, dict):
+                                        source = source.get('name', 'Unknown source')
+                                    
+                                    pub_date = article.get('publish_date') or article.get('publishedAt')
+                                    if pub_date:
+                                        try:
+                                            if isinstance(pub_date, str):
+                                                pub_date = datetime.strptime(pub_date, '%Y-%m-%dT%H:%M:%SZ')
+                                            pub_date = pub_date.strftime('%B %d, %Y')
+                                            st.caption(f"{source} • {pub_date}")
+                                        except:
+                                            st.caption(f"{source}" if source else "")
+                                    
+                                    # Display summary or content
+                                    summary = article.get('summary') or article.get('description') or article.get('content', '')
+                                    if summary:
+                                        # Clean up the summary text
+                                        summary = ' '.join(summary.split()[:100])  # Limit to first 100 words
+                                        st.write(summary + '...' if len(summary) > 100 else summary)
+                                
+                                st.markdown("---")
+        
+        show_personalized_articles(user)
+    else:
+        # Existing search functionality
+        pass
         
         # Redirect to admin dashboard if not already there
         if 'admin_redirected' not in st.session_state:
@@ -615,7 +783,9 @@ if user:
     show_logout_button()
 
 # Main app header (only shown if not redirected to admin)
-st.markdown("""
+st.markdown("""Let's update the 
+create_user
+ function in models.py to include the interests parameter.
 <div class="main-header">
     <h1 class="main-title">PersonaTracker</h1>
     <p class="main-subtitle">AI-Powered Media Intelligence Platform</p>
