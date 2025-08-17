@@ -8,7 +8,46 @@ from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime
 
 # Load environment variables
-load_dotenv()
+
+from pathlib import Path
+
+# Get the directory where this script is located
+script_dir = Path(__file__).parent
+print(f"Script directory: {script_dir}")
+print(f"Files in script directory: {os.listdir(script_dir)}")
+
+# Load .env file from the same directory as this script
+env_path = script_dir / '.env'
+print(f"Loading .env file from: {env_path}")
+
+# Check if .env file exists and is readable
+if not env_path.exists():
+    print("❌ Error: .env file does not exist at the expected location")
+    print(f"Current directory: {os.getcwd()}")
+    print(f"Directory contents: {os.listdir(script_dir)}")
+else:
+    print(f"✅ .env file exists at: {env_path}")
+    try:
+        with open(env_path, 'r') as f:
+            print("🔒 .env file contents (first 3 lines):")
+            for i, line in enumerate(f):
+                if i < 3:  # Only show first 3 lines for security
+                    print(f"   {line.strip()}")
+                if i == 2 and len(f.readlines()) > 3:
+                    print("   ... (more lines not shown for security)")
+                    break
+    except Exception as e:
+        print(f"❌ Error reading .env file: {e}")
+
+# Load environment variables
+load_dotenv(env_path, override=True)
+
+# Debug: Print environment variables
+print("Environment variables loaded:", os.environ.get('MONGODB_URI') is not None)
+if os.environ.get('MONGODB_URI'):
+    print("MongoDB URI found in environment variables")
+else:
+    print("MongoDB URI NOT found in environment variables")
 
 # Available domains for user interests
 AVAILABLE_DOMAINS = [
