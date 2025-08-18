@@ -1289,21 +1289,17 @@ if user:
             
             with col2:
                 unique_sources = len(set(article.get('source', 'Unknown') for article in articles))
-                st.markdown(f"""
-                <div class="stats-card">
-                    <div class="stats-number">{unique_sources}</div>
-                    <div class="stats-label">News Sources</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # Removed image statistics as requested
-            
-            with col4:
                 date_range_days = (datetime.now() - datetime.strptime(start_date_str, '%Y-%m-%d')).days if start_date_str else 30
                 st.markdown(f"""
-                <div class="stats-card">
-                    <div class="stats-number">{date_range_days}</div>
-                    <div class="stats-label">Days Analyzed</div>
+                <div style="display: flex; gap: 15px; margin-bottom: 15px;">
+                    <div class="stats-card" style="flex: 1;">
+                        <div class="stats-number">{unique_sources}</div>
+                        <div class="stats-label">News Sources</div>
+                    </div>
+                    <div class="stats-card" style="flex: 1;">
+                        <div class="stats-number">{date_range_days}</div>
+                        <div class="stats-label">Days Analyzed</div>
+                    </div>
                 </div>
                 """, unsafe_allow_html=True)
 
