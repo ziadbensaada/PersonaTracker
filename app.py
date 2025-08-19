@@ -1464,7 +1464,6 @@ if user:
                                     <strong>📅 Published:</strong> {publish_date}<br>
                                     <strong>🔗 URL:</strong> <a href="{article['url']}" target="_blank" rel="noopener noreferrer" style="color: #3b82f6;">View Original Article</a>
                                     {f'<br><strong>✍️ Author:</strong> {article["author"]}' if article.get('author') and article['author'] != 'Unknown' else ''}
-                                    {f'<br><strong>🖼️ Image:</strong> Available' if article.get('image_url') else '<br><strong>🖼️ Image:</strong> Not available'}
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
