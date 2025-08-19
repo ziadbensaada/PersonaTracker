@@ -1408,11 +1408,6 @@ if user:
                                                 caption=f"📸 Source: {article.get('source', 'Unknown')}",
                                                 output_format='JPEG'
                                             )
-                                            st.markdown("""
-                                            <div class="image-status success">
-                                                <span>🟢 Image loaded</span>
-                                            </div>
-                                            """, unsafe_allow_html=True)
                                             # Update the article to indicate it has an image
                                             article['image_url'] = image_url
                                             article['has_image'] = True
@@ -1520,12 +1515,6 @@ if user:
                                 """, unsafe_allow_html=True)
                                 
                                 # Enhanced summary and keywords
-                                st.markdown(f"""
-                                <div class="ai-summary">
-                                    <strong>🤖 AI Analysis Summary:</strong><br>
-                                    {sentiment_result['Summary']}
-                                </div>
-                                """, unsafe_allow_html=True)
                                 
                                 if sentiment_result['Keywords']:
                                     keywords_html = ' '.join([f'<span class="keyword-tag">🏷️ {keyword}</span>' for keyword in sentiment_result['Keywords']])

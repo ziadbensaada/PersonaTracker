@@ -931,28 +931,23 @@ except Exception as e:
 def get_active_rss_feeds():
     """Fetch active RSS feeds from the database"""
     try:
-        feeds = list(rss_feeds_collection.find(
-            {"is_active": True},
-            {"url": 1, "name": 1, "category": 1, "_id": 0}
-        ))
-        return [feed['url'] for feed in feeds if 'url' in feed]
+        # Import here to avoid circular imports
+        from models import get_rss_feeds
+        
+        # Get all active feeds from database
+        feeds = get_rss_feeds(active_only=True)
+        if not feeds:
+            logger.warning("No active RSS feeds found in database")
+            return []
+            
+        logger.info(f"Fetched {len(feeds)} active RSS feeds from database")
+        return [feed['url'] for feed in feeds]
+        
     except Exception as e:
         logger.error(f"Error fetching RSS feeds from database: {e}")
-        # Fallback to default feeds if database is not available
-        return [
-            "https://leconomiste.com/rss-leconomiste",
-            "https://www.moroccoworldnews.com/feed/",
-            "https://lematin.ma/rssFeed/2",
-            "https://lavieeco.com/feed",
-            "https://akhbarona.com/feed/index.rss",
-            "https://feeds.bbci.co.uk/news/rss.xml",
-            "http://rss.cnn.com/rss/edition.rss",
-            "https://www.cbsnews.com/latest/rss/main",
-            "https://techcrunch.com/feed/",
-            "https://www.wired.com/feed",  # Updated RSS feed URL
-            "https://www.theverge.com/rss/index.xml",
-            "https://moroccotimes.tv/feed/"
-        ]
+        # Return empty list instead of falling back to hardcoded feeds
+        # This ensures we don't use outdated hardcoded feeds
+        return []
 
 def clean_text(text: str) -> str:
     """Clean and normalize text"""
